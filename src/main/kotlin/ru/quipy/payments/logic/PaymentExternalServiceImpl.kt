@@ -8,6 +8,7 @@ import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.CompositeRateLimiter
 import ru.quipy.common.utils.CountingRateLimiter
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -34,6 +35,7 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+    private val leakingBucket : LeakingBucketRateLimiter = LeakingBucketRateLimiter(6, Duration.ofSeconds(3.toLong()), 7)
 
     private val client = OkHttpClient.Builder().build()
 
@@ -47,8 +49,6 @@ class PaymentExternalSystemAdapterImpl(
         intervalPerPart,
         TimeUnit.MILLISECONDS
     )
-
-
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         while (!rateLimiter.tick()) {
@@ -70,6 +70,12 @@ class PaymentExternalSystemAdapterImpl(
         }.build()
 
         try {
+//            while(!rateLimiter.tick()) {
+//
+//            }
+            if (leakingBucket.tick()){
+
+            }
             client.newCall(request).execute().use { response ->
                 val body = try {
                     mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
