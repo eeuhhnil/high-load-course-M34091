@@ -15,6 +15,7 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
@@ -26,11 +27,11 @@ class PaymentExternalSystemAdapterImpl(
         private val emptyBody = RequestBody.create(null, ByteArray(0))
         private val mapper = ObjectMapper().registerKotlinModule()
 
-        // Dùng `companion object` để tái sử dụng `OkHttpClient`
+        // Tạo một OkHttpClient dùng chung
         private val client = OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)  // Thời gian kết nối tối đa
-            .readTimeout(10, TimeUnit.SECONDS)    // Thời gian đọc dữ liệu tối đa
-            .writeTimeout(10, TimeUnit.SECONDS)   // Thời gian ghi dữ liệu tối đa
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .writeTimeout(10, TimeUnit.SECONDS)
             .build()
     }
 
@@ -39,27 +40,49 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    // Khởi tạo Leaking Bucket Rate Limiter
     private val rateLimiter = LeakingBucketRateLimiter(
-        rateLimitPerSec.toLong(),  // Giới hạn request mỗi giây
-        Duration.ofSeconds(1),     // Thời gian tính toán giới hạn
-        parallelRequests           // Dung lượng xô (số request tối đa có thể chứa)
+        rateLimitPerSec.toLong(),
+        Duration.ofSeconds(1),
+        parallelRequests
     )
 
-    // Semaphore để giới hạn số request đồng thời
     private val semaphore = Semaphore(parallelRequests)
 
+    private val failureCount = AtomicInteger(0)
+    private val maxFailures = 10
+    private var isCircuitOpen = false
+    private var circuitResetTime = System.currentTimeMillis()
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        // Điều chỉnh kiểm soát tốc độ request với delay thay vì `Thread.sleep(100)`
-        while (!rateLimiter.tick()) {
-            kotlinx.coroutines.runBlocking { delay(50) } // Giảm tải CPU, tránh busy-waiting
+        if (isCircuitOpen) {
+            if (System.currentTimeMillis() > circuitResetTime) {
+                isCircuitOpen = false
+                failureCount.set(0)
+                logger.warn("[$accountName] Circuit breaker reset, resuming payments")
+            } else {
+                logger.warn("[$accountName] Circuit breaker open, rejecting request $paymentId")
+                return
+            }
         }
 
-        // Tính thời gian còn lại trước deadline để tối ưu `semaphore.tryAcquire()`
+        while (!rateLimiter.tick()) {
+            kotlinx.coroutines.runBlocking { delay(50) }
+        }
+
         val remainingTime = deadline - now()
-        if (remainingTime <= 0 || !semaphore.tryAcquire(remainingTime, TimeUnit.MILLISECONDS)) {
-            logger.warn("[$accountName] Too many concurrent requests, rejecting payment $paymentId")
+        if (remainingTime <= 0) {
+            logger.warn("[$accountName] Payment expired, rejecting payment $paymentId")
             return
+        }
+
+        if (!semaphore.tryAcquire(remainingTime, TimeUnit.MILLISECONDS)) {
+            logger.warn("[$accountName] Queueing request $paymentId due to high load")
+            kotlinx.coroutines.runBlocking { delay(100) }
+
+            if (!semaphore.tryAcquire(remainingTime - 100, TimeUnit.MILLISECONDS)) {
+                logger.warn("[$accountName] Still overloaded, rejecting payment $paymentId")
+                return
+            }
         }
 
         try {
@@ -79,20 +102,25 @@ class PaymentExternalSystemAdapterImpl(
 
             val body = performHttpRequestWithRetry(request)
 
+            if (body.result) {
+                failureCount.set(0)
+            } else {
+                trackFailure()
+            }
+
             logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
             paymentESService.update(paymentId) {
                 it.logProcessing(body.result, now(), transactionId, reason = body.message)
             }
         } finally {
-            semaphore.release() // Giải phóng slot trong semaphore sau khi xử lý xong
+            semaphore.release()
         }
     }
 
-    // Hàm retry request với Exponential Backoff
-    private fun performHttpRequestWithRetry(request: Request, maxRetries: Int = 3): ExternalSysResponse {
+    private fun performHttpRequestWithRetry(request: Request, maxRetries: Int = 5): ExternalSysResponse {
         var attempt = 0
-        var waitTime = 500L // Bắt đầu với 500ms
+        var waitTime = 500L
 
         while (attempt < maxRetries) {
             try {
@@ -105,12 +133,23 @@ class PaymentExternalSystemAdapterImpl(
                 logger.error("[$accountName] Unexpected error on attempt ${attempt + 1}", e)
             }
 
-            Thread.sleep(waitTime)
-            waitTime *= 2 // Exponential backoff
+            val jitter = (Math.random() * 100).toLong()
+            Thread.sleep(waitTime + jitter)
+
+            waitTime *= 2
             attempt++
         }
 
         return ExternalSysResponse("", "", false, "Max retries reached")
+    }
+
+    private fun trackFailure() {
+        val count = failureCount.incrementAndGet()
+        if (count >= maxFailures) {
+            isCircuitOpen = true
+            circuitResetTime = System.currentTimeMillis() + 30000 // 30s cooldown
+            logger.warn("[$accountName] Circuit breaker triggered due to $count consecutive failures")
+        }
     }
 
     override fun price() = properties.price
@@ -118,5 +157,4 @@ class PaymentExternalSystemAdapterImpl(
     override fun name() = properties.accountName
 }
 
-// Hàm lấy thời gian hiện tại
 public fun now() = System.currentTimeMillis()
