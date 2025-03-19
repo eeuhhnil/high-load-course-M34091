@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
   mongo:
     build:
-#      context: mongoDb
+      #      context: mongoDb
       dockerfile: mongoDb/Dockerfile
     restart: always
     ports:
