@@ -22,23 +22,11 @@ class PaymentSystemImpl(
 ) : PaymentService {
     companion object {
         val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
-        private val pool = ThreadPoolExecutor(
-            50,
-            100,
-            10,
-            TimeUnit.MINUTES,
-            LinkedBlockingQueue(),
-            Executors.defaultThreadFactory(),
-            ThreadPoolExecutor.AbortPolicy()
-
-        )
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         for (account in paymentAccounts) {
-            pool.submit(Runnable {
-                account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
-            })
+            account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
         }
     }
 }
