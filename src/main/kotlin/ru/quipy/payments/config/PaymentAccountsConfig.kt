@@ -28,7 +28,8 @@ class PaymentAccountsConfig {
     }
 
 
-    private val allowedAccounts = setOf("acc-3")
+    private val allowedAccounts = setOf("acc-5")
+
 
     @Value("\${payment.hostPort}")
     lateinit var paymentProviderHostPort: String
