@@ -66,7 +66,6 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
-        rateLimiter.tickBlocking()
 
         try {
             semaphore.acquire()
