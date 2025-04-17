@@ -28,7 +28,9 @@ class PaymentAccountsConfig {
     }
 
 
-    private val allowedAccounts = setOf("acc-8")
+    private val allowedAccounts = setOf("acc-7")
+
+
 
 
     @Value("\${payment.hostPort}")
