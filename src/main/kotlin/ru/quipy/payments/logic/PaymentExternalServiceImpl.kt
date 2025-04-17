@@ -52,12 +52,14 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
+
         if (isDeadlineExceeded(deadline)) {
             paymentESService.update(paymentId) {
                 it.logProcessing(false, now(), transactionId, reason = "Request dead.")
             }
             return
         }
+
 
         try {
             rateLimiter.tickBlocking()
