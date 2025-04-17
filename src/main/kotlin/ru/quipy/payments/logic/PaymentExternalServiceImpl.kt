@@ -36,7 +36,7 @@ class PaymentExternalSystemAdapterImpl(
     private val semaphore = Semaphore(parallelRequests)
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(Duration.ofMillis(properties.averageProcessingTime.toMillis() * 2))
+        .callTimeout(Duration.ofMillis(requestAverageProcessingTime.toMillis() + 100))
         .retryOnConnectionFailure(true)
         .build()
 
@@ -56,10 +56,11 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
-        val absoluteTimeout = now() + Duration.ofSeconds(8).toMillis()
 
         if (isDeadlineExceeded(deadline)) {
-            logTimeout(paymentId, transactionId, "Request expired before execution.")
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "Request dead.")
+            }
             return
         }
 
@@ -67,17 +68,17 @@ class PaymentExternalSystemAdapterImpl(
             rateLimiter.tickBlocking()
 
             if (isDeadlineExceeded(deadline)) {
-                logTimeout(paymentId, transactionId, "Request expired before execution.")
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = "Request dead.")
+                }
                 return
             }
 
-            val waitStart = now()
-            semaphore.acquire()
-            val waitTime = now() - waitStart
-            logger.warn("[$accountName] Semaphore wait time: $waitTime ms")
 
             if (isDeadlineExceeded(deadline)) {
-                logTimeout(paymentId, transactionId, "Request expired after acquiring semaphore.")
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = "Request dead.")
+                }
                 return
             }
 
@@ -86,7 +87,7 @@ class PaymentExternalSystemAdapterImpl(
 
             while (currentTry <= retryCount) {
                 currentTry += 1
-                if (success || now() > absoluteTimeout) {
+                if (success) {
                     break
                 }
 
@@ -113,7 +114,9 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 } catch (e: SocketTimeoutException) {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    logTimeout(paymentId, transactionId, "Request timeout.")
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                    }
                 } catch (e: Exception) {
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
@@ -126,12 +129,6 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
-    private fun logTimeout(paymentId: UUID, transactionId: UUID, reason: String) {
-        logger.error("[$accountName] Timeout: $reason for txId: $transactionId, payment: $paymentId")
-        paymentESService.update(paymentId) {
-            it.logProcessing(false, now(), transactionId, reason = reason)
-        }
-    }
 
     private fun isDeadlineExceeded(deadline: Long): Boolean {
         return now() + requestAverageProcessingTime.toMillis() > deadline
